@@ -1,4 +1,6 @@
 LICHESS_TOKEN=[your lichess token]
-LICHESS_USERNAME=[username of player whose date you want to pull]
+LICHESS_USERNAME=[username of player whose data you want to pull]
 GOOGLE_SERVICE_ACCOUNT_JSON=[path to local google service account file for drive upload]
 GOOGLE_DRIVE_FOLDER_ID=[folder id for file storage on Google Drive]
+
+NB: Square Braces not required

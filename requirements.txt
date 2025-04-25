@@ -1,0 +1,7 @@
+Collecting google-api-python-client
+  Using cached google_api_python_client-2.167.0-py2.py3-none-any.whl.metadata (6.7 kB)
+Collecting google-auth-httplib2
+  Using cached google_auth_httplib2-0.2.0-py2.py3-none-any.whl.metadata (2.2 kB)
+Collecting google-auth-oauthlib
+  Downloading google_auth_oauthlib-1.2.2-py3-none-any.whl.metadata (2.7 kB)
+Requirement already satisfied: pip in c:\users\chukw\documents\dev\lichess_report\venv\lib\site-packages (25.0.1)

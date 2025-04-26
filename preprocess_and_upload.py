@@ -163,10 +163,12 @@ for entry in rating_history:
     category = entry.get("name")
     for point in perfs:
         try:
-            date = datetime(point[0], point[1], point[2])
+            # Correct month by adding 1
+            date = datetime(point[0], point[1] + 1, point[2])
             rating_rows.append({"category": category, "date": date, "rating": point[3]})
         except ValueError:
             continue
+
 
 rating_df = pd.DataFrame(rating_rows)
 

@@ -2,9 +2,11 @@
 """
 run_multiple_scripts.py
 
-Runs multiple Python scripts in the same directory.
-Can use a hardcoded list of scripts or dynamically find all .py files.
+Runs multiple Python scripts in the same directory with a provided username.
+Scripts are hardcoded to ensure specific execution order.
 Logs execution status and errors.
+
+Usage: python run_multiple_scripts.py <username>
 """
 
 import os
@@ -16,20 +18,14 @@ def get_current_directory():
     """Get the directory of this script."""
     return os.path.dirname(os.path.abspath(__file__))
 
-def get_python_files(directory, exclude_file):
-    """Get all .py files in the directory, excluding the specified file."""
-    return [
-        f for f in os.listdir(directory)
-        if f.endswith('.py') and f != exclude_file and os.path.isfile(os.path.join(directory, f))
-    ]
-
-def run_script(script_path):
-    """Run a Python script and return the result."""
-    print(f"[{datetime.now()}] Running {script_path}...")
+def run_script(script_path, username):
+    """Run a Python script with the given username and return the result."""
+    print(f"[{datetime.now()}] Running {script_path} for user {username}...")
     try:
         # Use sys.executable to ensure the same Python version is used
+        # Pass the username as a command-line argument to the script
         result = subprocess.run(
-            [sys.executable, script_path],
+            [sys.executable, script_path, username],
             capture_output=True,
             text=True,
             check=False
@@ -48,32 +44,37 @@ def run_script(script_path):
         return 1
 
 def main():
+    # Check for username argument
+    if len(sys.argv) != 2:
+        raise RuntimeError("Usage: python run_multiple_scripts.py <username>")
+    username = sys.argv[1]
+
     # Directory of this script
     current_dir = get_current_directory()
-    this_script = os.path.basename(__file__)
 
-    # Option 1: Hardcode specific scripts to run (uncomment and edit as needed)
+    # Hardcode specific scripts to run in the desired order
     scripts_to_run = [
-        "fetch_games.py",
+        "fetch_games.py",  # Assuming fetch_games.py is the renamed fetch_json.py
         "fetch_rating_history.py",
         "preprocess_and_upload.py",
     ]
 
-    # Option 2: Dynamically find all .py files (comment out if using hardcoded list)
-    scripts_to_run = get_python_files(current_dir, this_script)
-
-    if not scripts_to_run:
-        print(f"[{datetime.now()}] No Python scripts found to run.")
-        return
+    # Verify that all scripts exist
+    missing_scripts = [script for script in scripts_to_run if not os.path.exists(os.path.join(current_dir, script))]
+    if missing_scripts:
+        raise RuntimeError(f"[{datetime.now()}] The following scripts were not found: {missing_scripts}")
 
     print(f"[{datetime.now()}] Found {len(scripts_to_run)} scripts to run: {scripts_to_run}")
 
-    # Run each script
+    # Run each script with the username
     for script in scripts_to_run:
         script_path = os.path.join(current_dir, script)
-        run_script(script_path)
+        exit_code = run_script(script_path, username)
+        if exit_code != 0:
+            print(f"[{datetime.now()}] Stopping execution due to failure in {script}.")
+            sys.exit(exit_code)
 
-    print(f"[{datetime.now()}] All scripts completed.")
+    print(f"[{datetime.now()}] All scripts completed successfully.")
 
 if __name__ == "__main__":
     main()

@@ -32,14 +32,8 @@ jobs:
           echo "GOOGLE_DRIVE_CREDENTIALS=${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}" >> .env
           echo "DRIVE_PARENT_FOLDER_ID=${{ secrets.DRIVE_PARENT_FOLDER_ID }}" >> .env
 
-      - name: Run fetch_json.py
-        run: python fetch_json.py ${{ github.event.inputs.username }}
-
-      - name: Run fetch_rating_history.py
-        run: python fetch_rating_history.py ${{ github.event.inputs.username }}
-
-      - name: Run preprocess_and_upload.py
-        run: python preprocess_and_upload.py ${{ github.event.inputs.username }}
+      - name: Run all scripts
+        run: python run_all_scripts.py ${{ github.event.inputs.username }}
 
       - name: Clean up
         run: rm -f *.json *.csv || true

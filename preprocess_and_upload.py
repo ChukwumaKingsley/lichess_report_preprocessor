@@ -1,24 +1,32 @@
+#!/usr/bin/env python3
+"""
+preprocess_and_upload.py
+
+Processes game data and rating history, saves them as CSV files,
+and uploads to a user-specific Google Drive folder.
+
+Usage: python preprocess_and_upload.py <username>
+"""
+
 import os
+import sys
 import json
 import pandas as pd
+from datetime import datetime
 from dotenv import load_dotenv
-from google.oauth2 import service_account
+from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-from datetime import datetime
 
 # Load environment variables
 load_dotenv()
-USERNAME = os.getenv("LICHESS_USERNAME")
-SERVICE_ACCOUNT_FILE = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")  # Path to JSON key file
-DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")  # Google Drive folder ID
+GOOGLE_DRIVE_CREDENTIALS = os.getenv("GOOGLE_DRIVE_CREDENTIALS")
+PARENT_FOLDER_ID = os.getenv("DRIVE_PARENT_FOLDER_ID")
 
-if not USERNAME:
-    raise RuntimeError("LICHESS_USERNAME not set in .env")
-if not SERVICE_ACCOUNT_FILE:
-    raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON not set in .env")
-if not DRIVE_FOLDER_ID:
-    raise RuntimeError("GOOGLE_DRIVE_FOLDER_ID not set in .env")
+# Get username from command-line argument
+if len(sys.argv) != 2:
+    raise RuntimeError("Usage: python preprocess_and_upload.py <username>")
+USERNAME = sys.argv[1]
 
 # Filenames based on username
 GAMES_INPUT_JSON = f"games_{USERNAME}.json"
@@ -26,14 +34,74 @@ GAMES_OUTPUT_CSV = f"games_{USERNAME}.csv"
 RATING_HISTORY_INPUT_JSON = f"rating_history_{USERNAME}.json"
 RATING_HISTORY_OUTPUT_CSV = f"rating_history_{USERNAME}.csv"
 
+# Check config
+if not GOOGLE_DRIVE_CREDENTIALS:
+    raise RuntimeError("GOOGLE_DRIVE_CREDENTIALS not set in .env")
+if not PARENT_FOLDER_ID:
+    raise RuntimeError("DRIVE_PARENT_FOLDER_ID not set in .env")
+
+# Set up Google Drive credentials
+try:
+    creds = Credentials.from_service_account_info(json.loads(GOOGLE_DRIVE_CREDENTIALS))
+except json.JSONDecodeError as e:
+    raise RuntimeError(f"Invalid JSON in GOOGLE_DRIVE_CREDENTIALS: {e}")
+drive_service = build("drive", "v3", credentials=creds)
+
+# Find or create a folder for the user
+def get_or_create_user_folder(username):
+    query = f"name='{username}' and mimeType='application/vnd.google-apps.folder' and '{PARENT_FOLDER_ID}' in parents"
+    response = drive_service.files().list(q=query, fields="files(id, name)").execute()
+    folders = response.get("files", [])
+
+    if folders:
+        folder_id = folders[0]["id"]
+        print(f"[{datetime.now()}] Found existing folder for '{username}' with ID: {folder_id}")
+    else:
+        folder_metadata = {
+            "name": username,
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": [PARENT_FOLDER_ID]
+        }
+        folder = drive_service.files().create(body=folder_metadata, fields="id").execute()
+        folder_id = folder.get("id")
+        print(f"[{datetime.now()}] Created folder for '{username}' with ID: {folder_id}")
+    return folder_id
+
+# Upload or update file to Drive
+def upload_to_drive(file_path, folder_id, mimetype="application/json"):
+    file_name = os.path.basename(file_path)
+    query = f"name='{file_name}' and '{folder_id}' in parents and trashed=false"
+    response = drive_service.files().list(q=query, fields="files(id, name)").execute()
+    files = response.get("files", [])
+
+    media = MediaFileUpload(file_path, mimetype=mimetype)
+    if files:
+        file_id = files[0]["id"]
+        updated_file = drive_service.files().update(fileId=file_id, media_body=media).execute()
+        print(f"[{datetime.now()}] Updated existing file '{file_name}' in Drive folder (ID: {file_id})")
+    else:
+        file_metadata = {"name": file_name, "parents": [folder_id]}
+        new_file = drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
+        print(f"[{datetime.now()}] Uploaded new file '{file_name}' to Drive folder (ID: {new_file.get('id')})")
+
+# Get the user's folder ID
+USER_FOLDER_ID = get_or_create_user_folder(USERNAME)
+
+# Check if input files exist locally (should be created by fetch scripts in the pipeline)
+if not os.path.exists(GAMES_INPUT_JSON):
+    raise RuntimeError(f"[{datetime.now()}] Input file '{GAMES_INPUT_JSON}' not found. Ensure fetch_json.py ran first.")
+if not os.path.exists(RATING_HISTORY_INPUT_JSON):
+    raise RuntimeError(f"[{datetime.now()}] Input file '{RATING_HISTORY_INPUT_JSON}' not found. Ensure fetch_rating_history.py ran first.")
+
 # --------------------------------
-# STEP 1: Read and preprocess data
+# STEP 1: Read and preprocess game data
 # --------------------------------
 # Read NDJSON file
 games = []
 with open(GAMES_INPUT_JSON, "r", encoding="utf-8") as f:
     for line in f:
-        games.append(json.loads(line))
+        if line.strip():  # Skip empty lines
+            games.append(json.loads(line))
 
 # Convert to DataFrame
 df = pd.DataFrame(games)
@@ -68,13 +136,10 @@ def format_time_control(clock):
             # If the initial time is less than 60 seconds, show as a fraction of a minute
             if initial < 60:
                 # Simplify the fraction (initial/60) and get the numerator/denominator
-                numerator = initial
-                denominator = 60
-                # Reduce the fraction
                 from math import gcd
-                common_divisor = gcd(numerator, denominator)
-                numerator //= common_divisor
-                denominator //= common_divisor
+                common_divisor = gcd(initial, 60)
+                numerator = initial // common_divisor
+                denominator = 60 // common_divisor
                 # Return the fraction format for initial time
                 return f"{numerator}/{denominator}+{increment}"
             else:
@@ -149,9 +214,11 @@ final_df = df[columns]
 # Save to CSV
 to_save_df = final_df.copy()
 to_save_df.to_csv(GAMES_OUTPUT_CSV, index=False, encoding="utf-8-sig")
-print(f"Saved preprocessed game data to '{GAMES_OUTPUT_CSV}'")
+print(f"[{datetime.now()}] Saved preprocessed game data to '{GAMES_OUTPUT_CSV}'")
 
-
+# --------------------------------
+# STEP 2: Process rating history
+# --------------------------------
 # Read rating history JSON file
 rating_history = []
 with open(RATING_HISTORY_INPUT_JSON, "r", encoding="utf-8") as f:
@@ -168,7 +235,6 @@ for entry in rating_history:
             rating_rows.append({"category": category, "date": date, "rating": point[3]})
         except ValueError:
             continue
-
 
 rating_df = pd.DataFrame(rating_rows)
 
@@ -198,31 +264,10 @@ t_rating = rating_final.sort_values(by='date', ascending=False).reset_index(drop
 # Save rating history CSV with BOM
 rating_csv = t_rating.copy()
 rating_csv.to_csv(RATING_HISTORY_OUTPUT_CSV, index=False, encoding="utf-8-sig")
-print(f"Saved rating history to '{RATING_HISTORY_OUTPUT_CSV}'")
+print(f"[{datetime.now()}] Saved rating history to '{RATING_HISTORY_OUTPUT_CSV}'")
 
 # --------------------------------
 # STEP 3: Upload both CSVs to Google Drive
 # --------------------------------
-SCOPES = ['https://www.googleapis.com/auth/drive.file']
-creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
-service = build('drive', 'v3', credentials=creds)
-
-def find_file_id(name, folder_id):
-    q = f"name='{name}' and '{folder_id}' in parents and trashed=false"
-    res = service.files().list(q=q, fields='files(id,name)').execute()
-    files = res.get('files', [])
-    return files[0]['id'] if files else None
-
-def upload_or_update_file(filename):
-    file_id = find_file_id(filename, DRIVE_FOLDER_ID)
-    media = MediaFileUpload(filename, mimetype='text/csv', resumable=True)
-    if file_id:
-        service.files().update(fileId=file_id, media_body=media).execute()
-        print(f"Updated file on Drive: {filename} (ID: {file_id})")
-    else:
-        file_metadata = {'name': filename, 'parents': [DRIVE_FOLDER_ID]}
-        new_file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-        print(f"Uploaded new file to Drive: {filename} (ID: {new_file.get('id')})")
-
-upload_or_update_file(GAMES_OUTPUT_CSV)
-upload_or_update_file(RATING_HISTORY_OUTPUT_CSV)
+upload_to_drive(GAMES_OUTPUT_CSV, USER_FOLDER_ID, mimetype="text/csv")
+upload_to_drive(RATING_HISTORY_OUTPUT_CSV, USER_FOLDER_ID, mimetype="text/csv")

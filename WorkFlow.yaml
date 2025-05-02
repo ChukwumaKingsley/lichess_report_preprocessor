@@ -1,0 +1,45 @@
+name: Lichess Data Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        description: 'Lichess username to fetch data for'
+        required: true
+        type: string
+
+jobs:
+  fetch-and-process:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Create .env file
+        run: |
+          echo "LICHESS_TOKEN=${{ secrets.LICHESS_TOKEN }}" > .env
+          echo "GOOGLE_DRIVE_CREDENTIALS=${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}" >> .env
+          echo "DRIVE_PARENT_FOLDER_ID=${{ secrets.DRIVE_PARENT_FOLDER_ID }}" >> .env
+
+      - name: Run fetch_json.py
+        run: python fetch_json.py ${{ github.event.inputs.username }}
+
+      - name: Run fetch_rating_history.py
+        run: python fetch_rating_history.py ${{ github.event.inputs.username }}
+
+      - name: Run preprocess_and_upload.py
+        run: python preprocess_and_upload.py ${{ github.event.inputs.username }}
+
+      - name: Clean up
+        run: rm -f *.json *.csv || true

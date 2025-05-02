@@ -19,13 +19,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'  # Use 3.11 for better compatibility (can revert to 3.12 if needed)
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install --upgrade setuptools wheel  # Ensure build tools are up-to-date
-          pip install -r requirements.txt
+          pip install --upgrade setuptools wheel
+          pip install -r requirements.txt --verbose  # Add --verbose for more details
 
       - name: Create .env file
         run: |

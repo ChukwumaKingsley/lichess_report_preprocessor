@@ -21,13 +21,18 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 import io
 
-# Load environment variables
 load_dotenv()
-TOKEN = os.getenv("LICHESS_TOKEN")
-PARENT_FOLDER_ID = os.getenv("DRIVE_PARENT_FOLDER_ID")
+LICHESS_TOKEN = os.getenv("LICHESS_TOKEN")
+DRIVE_PARENT_FOLDER_ID = os.getenv("DRIVE_PARENT_FOLDER_ID")
 
-with open("credentials.json", "r") as f:
-    creds = Credentials.from_service_account_info(json.load(f))
+# Build the Drive service (uses GOOGLE_APPLICATION_CREDENTIALS automatically)
+try:
+    drive_service = build("drive", "v3")
+    # Example: List files (replace with your logic)
+    results = drive_service.files().list().execute()
+    print(results)
+except HttpError as e:
+    print(f"An error occurred: {e}")
 
 # Get username from command-line argument
 if len(sys.argv) != 2:

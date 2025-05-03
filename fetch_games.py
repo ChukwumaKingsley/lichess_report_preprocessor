@@ -24,8 +24,10 @@ import io
 # Load environment variables
 load_dotenv()
 TOKEN = os.getenv("LICHESS_TOKEN")
-GOOGLE_DRIVE_CREDENTIALS = os.getenv("GOOGLE_DRIVE_CREDENTIALS")
 PARENT_FOLDER_ID = os.getenv("DRIVE_PARENT_FOLDER_ID")
+
+with open("credentials.json", "r") as f:
+    creds = Credentials.from_service_account_info(json.load(f))
 
 # Get username from command-line argument
 if len(sys.argv) != 2:

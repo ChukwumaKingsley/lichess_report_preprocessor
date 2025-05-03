@@ -19,25 +19,25 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12.2'
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install --upgrade setuptools wheel
-          pip install -r requirements.txt --verbose  # Add --verbose for more details
+          pip install -r requirements.txt
 
-      - name: Create .env file
+      - name: Create credentials file
         run: |
+          echo "${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}" > credentials.json
           echo "LICHESS_TOKEN=${{ secrets.LICHESS_TOKEN }}" > .env
-          echo "GOOGLE_DRIVE_CREDENTIALS=${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}" >> .env
           echo "DRIVE_PARENT_FOLDER_ID=${{ secrets.DRIVE_PARENT_FOLDER_ID }}" >> .env
 
-      - name: Debug .env file
-        run: cat .env
+      - name: Debug credentials file
+        run: cat credentials.json
 
       - name: Run all scripts
-        run: python run_all_scripts.py ${{ github.event.inputs.username }}
+        run: python run_multiple_scripts.py ${{ github.event.inputs.username }}
 
       - name: Clean up
         run: rm -f *.json *.csv || true

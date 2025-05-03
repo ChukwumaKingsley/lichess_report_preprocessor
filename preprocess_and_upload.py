@@ -14,16 +14,23 @@ import json
 import pandas as pd
 from datetime import datetime
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
-# Load environment variables
+# Load .env for DRIVE_PARENT_FOLDER_ID
 load_dotenv()
-PARENT_FOLDER_ID = os.getenv("DRIVE_PARENT_FOLDER_ID")
+DRIVE_PARENT_FOLDER_ID = os.getenv("DRIVE_PARENT_FOLDER_ID")
 
-with open("credentials.json", "r") as f:
-    creds = Credentials.from_service_account_info(json.load(f))
+# Check config
+if not DRIVE_PARENT_FOLDER_ID:
+    raise RuntimeError("DRIVE_PARENT_FOLDER_ID not set in .env")
+
+# Build the Drive service (uses GOOGLE_APPLICATION_CREDENTIALS from workflow)
+try:
+    drive_service = build("drive", "v3")
+except HttpError as e:
+    raise RuntimeError(f"Failed to build Drive service: {e}")
 
 # Get username from command-line argument
 if len(sys.argv) != 2:
@@ -36,22 +43,9 @@ GAMES_OUTPUT_CSV = f"games_{USERNAME}.csv"
 RATING_HISTORY_INPUT_JSON = f"rating_history_{USERNAME}.json"
 RATING_HISTORY_OUTPUT_CSV = f"rating_history_{USERNAME}.csv"
 
-# Check config
-if not GOOGLE_DRIVE_CREDENTIALS:
-    raise RuntimeError("GOOGLE_DRIVE_CREDENTIALS not set in .env")
-if not PARENT_FOLDER_ID:
-    raise RuntimeError("DRIVE_PARENT_FOLDER_ID not set in .env")
-
-# Set up Google Drive credentials
-try:
-    creds = Credentials.from_service_account_info(json.loads(GOOGLE_DRIVE_CREDENTIALS))
-except json.JSONDecodeError as e:
-    raise RuntimeError(f"Invalid JSON in GOOGLE_DRIVE_CREDENTIALS: {e}")
-drive_service = build("drive", "v3", credentials=creds)
-
 # Find or create a folder for the user
 def get_or_create_user_folder(username):
-    query = f"name='{username}' and mimeType='application/vnd.google-apps.folder' and '{PARENT_FOLDER_ID}' in parents"
+    query = f"name='{username}' and mimeType='application/vnd.google-apps.folder' and '{DRIVE_PARENT_FOLDER_ID}' in parents"
     response = drive_service.files().list(q=query, fields="files(id, name)").execute()
     folders = response.get("files", [])
 
@@ -62,7 +56,7 @@ def get_or_create_user_folder(username):
         folder_metadata = {
             "name": username,
             "mimeType": "application/vnd.google-apps.folder",
-            "parents": [PARENT_FOLDER_ID]
+            "parents": [DRIVE_PARENT_FOLDER_ID]
         }
         folder = drive_service.files().create(body=folder_metadata, fields="id").execute()
         folder_id = folder.get("id")
@@ -135,17 +129,13 @@ def format_time_control(clock):
         initial = clock.get('initial')
         increment = clock.get('increment')
         if initial is not None and increment is not None:
-            # If the initial time is less than 60 seconds, show as a fraction of a minute
             if initial < 60:
-                # Simplify the fraction (initial/60) and get the numerator/denominator
                 from math import gcd
                 common_divisor = gcd(initial, 60)
                 numerator = initial // common_divisor
                 denominator = 60 // common_divisor
-                # Return the fraction format for initial time
                 return f"{numerator}/{denominator}+{increment}"
             else:
-                # Convert seconds to minutes for times >= 60 seconds
                 initial_minutes = initial // 60
                 return f"{initial_minutes}+{increment}"
     return None

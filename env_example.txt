@@ -1,6 +1,10 @@
 LICHESS_TOKEN=[your lichess token]
-LICHESS_USERNAME=[username of player whose data you want to pull]
-GOOGLE_SERVICE_ACCOUNT_JSON=[path to local google service account file for drive upload]
 GOOGLE_DRIVE_FOLDER_ID=[folder id for file storage on Google Drive]
 
-NB: Square Braces not required
+NB:
+1. Square Braces not required
+2. To run offline (not via github actions) Create credentials.json and set GOOGLE_APPLICATION_CREDENTIALS:
+    Windows: set GOOGLE_APPLICATION_CREDENTIALS=%CD%\credentials.json
+    PowerShell: $env:GOOGLE_APPLICATION_CREDENTIALS = "$PWD\credentials.json"
+    Unix/Mac: export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/credentials.json
+

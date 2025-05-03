@@ -33,6 +33,9 @@ jobs:
           echo "GOOGLE_DRIVE_CREDENTIALS=${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}" >> .env
           echo "DRIVE_PARENT_FOLDER_ID=${{ secrets.DRIVE_PARENT_FOLDER_ID }}" >> .env
 
+      - name: Debug .env file
+        run: cat .env
+
       - name: Run all scripts
         run: python run_all_scripts.py ${{ github.event.inputs.username }}
 

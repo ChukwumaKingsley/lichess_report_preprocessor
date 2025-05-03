@@ -30,7 +30,7 @@ if not LICHESS_TOKEN:
 if not DRIVE_PARENT_FOLDER_ID:
     raise RuntimeError("DRIVE_PARENT_FOLDER_ID not set in .env")
 
-# Build the Drive service (uses GOOGLE_APPLICATION_CREDENTIALS from workflow)
+# Build the Drive service (uses GOOGLE_APPLICATION_CREDENTIALS from environment)
 try:
     drive_service = build("drive", "v3")
 except HttpError as e:
@@ -40,9 +40,15 @@ except HttpError as e:
 if len(sys.argv) != 2:
     raise RuntimeError("Usage: python fetch_rating_history.py <username>")
 USERNAME = sys.argv[1]
-OUTPUT_JSON = f"rating_history_{USERNAME}.json"
 
-# Find or create a folder for the user
+# Create player-specific folder under Player Data
+PLAYER_DATA_FOLDER = os.path.join(os.getcwd(), "Player Data")
+os.makedirs(PLAYER_DATA_FOLDER, exist_ok=True)
+PLAYER_FOLDER = os.path.join(PLAYER_DATA_FOLDER, USERNAME)
+os.makedirs(PLAYER_FOLDER, exist_ok=True)
+OUTPUT_JSON = os.path.join(PLAYER_FOLDER, f"rating_history_{USERNAME}.json")
+
+# Find or create a folder for the user on Google Drive
 def get_or_create_user_folder(username):
     query = f"name='{username}' and mimeType='application/vnd.google-apps.folder' and '{DRIVE_PARENT_FOLDER_ID}' in parents"
     response = drive_service.files().list(q=query, fields="files(id, name)").execute()
@@ -65,7 +71,7 @@ def get_or_create_user_folder(username):
 # Download existing JSON from Drive if available
 def download_from_drive(file_name, folder_id):
     try:
-        query = f"name='{file_name}' and '{folder_id}' in parents"
+        query = f"name='{os.path.basename(file_name)}' and '{folder_id}' in parents"
         files = drive_service.files().list(q=query, fields="files(id, name)").execute()
         if files["files"]:
             file_id = files["files"][0]["id"]
@@ -79,7 +85,7 @@ def download_from_drive(file_name, folder_id):
             fh.seek(0)
             with open(file_name, "wb") as f:
                 f.write(fh.read())
-            print(f"[{datetime.now()}] Downloaded existing '{file_name}' from Drive folder.")
+            print(f"[{datetime.now()}] Downloaded existing '{os.path.basename(file_name)}' from Drive folder.")
             return True
     except Exception as e:
         print(f"[{datetime.now()}] Error downloading from Drive: {e}")

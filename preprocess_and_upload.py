@@ -26,7 +26,7 @@ DRIVE_PARENT_FOLDER_ID = os.getenv("DRIVE_PARENT_FOLDER_ID")
 if not DRIVE_PARENT_FOLDER_ID:
     raise RuntimeError("DRIVE_PARENT_FOLDER_ID not set in .env")
 
-# Build the Drive service (uses GOOGLE_APPLICATION_CREDENTIALS from workflow)
+# Build the Drive service (uses GOOGLE_APPLICATION_CREDENTIALS from environment)
 try:
     drive_service = build("drive", "v3")
 except HttpError as e:
@@ -37,11 +37,15 @@ if len(sys.argv) != 2:
     raise RuntimeError("Usage: python preprocess_and_upload.py <username>")
 USERNAME = sys.argv[1]
 
-# Filenames based on username
-GAMES_INPUT_JSON = f"games_{USERNAME}.json"
-GAMES_OUTPUT_CSV = f"games_{USERNAME}.csv"
-RATING_HISTORY_INPUT_JSON = f"rating_history_{USERNAME}.json"
-RATING_HISTORY_OUTPUT_CSV = f"rating_history_{USERNAME}.csv"
+# Create player-specific folder under Player Data
+PLAYER_DATA_FOLDER = os.path.join(os.getcwd(), "Player Data")
+os.makedirs(PLAYER_DATA_FOLDER, exist_ok=True)
+PLAYER_FOLDER = os.path.join(PLAYER_DATA_FOLDER, USERNAME)
+os.makedirs(PLAYER_FOLDER, exist_ok=True)
+GAMES_INPUT_JSON = os.path.join(PLAYER_FOLDER, f"games_{USERNAME}.json")
+GAMES_OUTPUT_CSV = os.path.join(PLAYER_FOLDER, f"games_{USERNAME}.csv")
+RATING_HISTORY_INPUT_JSON = os.path.join(PLAYER_FOLDER, f"rating_history_{USERNAME}.json")
+RATING_HISTORY_OUTPUT_CSV = os.path.join(PLAYER_FOLDER, f"rating_history_{USERNAME}.csv")
 
 # Find or create a folder for the user
 def get_or_create_user_folder(username):

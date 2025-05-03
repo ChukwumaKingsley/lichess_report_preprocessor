@@ -29,15 +29,15 @@ jobs:
 
       - name: Create credentials file
         run: |
-          echo "${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}" > credentials.json
+          echo "${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}" | base64 -d > credentials.json
           echo "LICHESS_TOKEN=${{ secrets.LICHESS_TOKEN }}" > .env
           echo "DRIVE_PARENT_FOLDER_ID=${{ secrets.DRIVE_PARENT_FOLDER_ID }}" >> .env
 
-      - name: Debug credentials file
-        run: cat credentials.json
-
       - name: Run all scripts
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ./credentials.json
         run: python run_all_scripts.py ${{ github.event.inputs.username }}
 
       - name: Clean up
+        if: always()
         run: rm -f *.json *.csv || true

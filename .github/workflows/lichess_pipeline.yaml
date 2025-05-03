@@ -37,7 +37,7 @@ jobs:
         run: cat credentials.json
 
       - name: Run all scripts
-        run: python run_multiple_scripts.py ${{ github.event.inputs.username }}
+        run: python run_all_scripts.py ${{ github.event.inputs.username }}
 
       - name: Clean up
         run: rm -f *.json *.csv || true

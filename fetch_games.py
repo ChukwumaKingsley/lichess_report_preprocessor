@@ -121,22 +121,20 @@ def upload_to_drive(file_path, folder_id, mimetype="application/json"):
                 print(f"[{datetime.now()}] Failed after {max_retries} retries: {e}")
                 raise
 
-# Fetch games in batches
+# Fetch games in batches until no more games are returned
 def fetch_games_in_batches(url, headers, params, output_file):
     max_games_per_batch = 1000  # Adjust as needed
     mode = "a" if os.path.exists(output_file) else "w"
     total_games = 0
     since = params.get("since", None)
-    until = int(datetime.now().timestamp() * 1000)  # Current timestamp in milliseconds
 
     while True:
         batch_params = params.copy()
         if since:
             batch_params["since"] = since
-        batch_params["until"] = until
         batch_params["max"] = max_games_per_batch
 
-        print(f"[{datetime.now()}] Fetching up to {max_games_per_batch} games from {datetime.utcfromtimestamp(since/1000 if since else 0)} UTC...")
+        print(f"[{datetime.now()}] Fetching up to {max_games_per_batch} games starting from {datetime.utcfromtimestamp(since/1000 if since else 0)} UTC...")
         resp = requests.get(url, headers=headers, params=batch_params, stream=True)
         resp.raise_for_status()
 
@@ -156,7 +154,7 @@ def fetch_games_in_batches(url, headers, params, output_file):
         total_games += batch_games
         print(f"[{datetime.now()}] Fetched {batch_games} games in this batch (total: {total_games}).")
 
-        if batch_games < max_games_per_batch:
+        if batch_games == 0:
             break  # No more games to fetch
 
         since = last_created_at + 1

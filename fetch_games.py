@@ -72,9 +72,9 @@ def get_or_create_user_folder(username):
     return folder_id
 
 # Download existing JSON from Drive if available
-def download_from_drive(file_name, folder_id):
+def download_from_drive(file_path, folder_id):
     try:
-        query = f"name='{os.path.basename(file_name)}' and '{folder_id}' in parents"
+        query = f"name='{os.path.basename(file_path)}' and '{folder_id}' in parents"
         files = drive_service.files().list(q=query, fields="files(id, name)").execute()
         if files["files"]:
             file_id = files["files"][0]["id"]
@@ -86,19 +86,33 @@ def download_from_drive(file_name, folder_id):
                 status, done = downloader.next_chunk()
                 print(f"[{datetime.now()}] Downloaded {int(status.progress() * 100)}%.")
             fh.seek(0)
-            with open(file_name, "wb") as f:
+            with open(file_path, "wb") as f:
                 f.write(fh.read())
-            print(f"[{datetime.now()}] Downloaded existing '{os.path.basename(file_name)}' from Drive folder.")
+            print(f"[{datetime.now()}] Downloaded existing '{os.path.basename(file_path)}' from Drive folder.")
             return True
     except Exception as e:
         print(f"[{datetime.now()}] Error downloading from Drive: {e}")
     return False
 
-# Upload JSON to Drive with retry logic
-def upload_to_drive(file_path, folder_id, mimetype="application/json"):
+# Upload JSON to Drive with enhanced retry logic and file splitting
+def upload_to_drive(file_path, folder_id, mimetype="application/json", max_file_size_mb=15):
+    file_name = os.path.basename(file_path)
+    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)  # Size in MB
+    print(f"[{datetime.now()}] Attempting to upload '{file_name}' (size: {file_size_mb:.2f} MB)")
+
+    if file_size_mb > max_file_size_mb:
+        print(f"[{datetime.now()}] File size ({file_size_mb:.2f} MB) exceeds {max_file_size_mb} MB limit. Splitting file...")
+        split_files = split_large_file(file_path, max_file_size_mb)
+        for i, split_file in enumerate(split_files):
+            split_name = f"{os.path.splitext(file_name)[0]}_part{i+1}.json"
+            upload_single_file(os.path.join(PLAYER_FOLDER, split_name), folder_id, mimetype)
+    else:
+        upload_single_file(file_path, folder_id, mimetype)
+
+def upload_single_file(file_path, folder_id, mimetype):
     file_name = os.path.basename(file_path)
     query = f"name='{file_name}' and '{folder_id}' in parents and trashed=false"
-    max_retries = 3
+    max_retries = 5
     for attempt in range(max_retries):
         try:
             response = drive_service.files().list(q=query, fields="files(id, name)").execute()
@@ -113,54 +127,45 @@ def upload_to_drive(file_path, folder_id, mimetype="application/json"):
                 new_file = drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
                 print(f"[{datetime.now()}] Uploaded new file '{file_name}' to Drive folder (ID: {new_file.get('id')})")
             break
-        except (HttpError, IOError) as e:
+        except (HttpError, IOError, ssl.SSLEOFError) as e:
             if attempt < max_retries - 1:
-                print(f"[{datetime.now()}] Retry {attempt + 1}/{max_retries} due to error: {e}")
-                time.sleep(2 ** attempt)  # Exponential backoff
+                wait_time = 2 ** attempt  # Exponential backoff
+                print(f"[{datetime.now()}] Retry {attempt + 1}/{max_retries} due to error: {e}. Waiting {wait_time} seconds...")
+                time.sleep(wait_time)
             else:
                 print(f"[{datetime.now()}] Failed after {max_retries} retries: {e}")
                 raise
 
-# Fetch games in batches until no more games are returned
-def fetch_games_in_batches(url, headers, params, output_file):
-    max_games_per_batch = 1000  # Adjust as needed
-    mode = "a" if os.path.exists(output_file) else "w"
-    total_games = 0
-    since = params.get("since", None)
+# Split large JSON file into smaller parts
+def split_large_file(file_path, max_size_mb):
+    max_size_bytes = max_size_mb * 1024 * 1024
+    split_files = []
+    current_size = 0
+    current_lines = []
+    part_num = 1
 
-    while True:
-        batch_params = params.copy()
-        if since:
-            batch_params["since"] = since
-        batch_params["max"] = max_games_per_batch
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line_size = len(line.encode("utf-8"))
+            if current_size + line_size > max_size_bytes and current_lines:
+                split_file = f"{os.path.splitext(file_path)[0]}_part{part_num}.json"
+                with open(split_file, "w", encoding="utf-8") as out_f:
+                    out_f.write("".join(current_lines))
+                split_files.append(split_file)
+                current_lines = [line]
+                current_size = line_size
+                part_num += 1
+            else:
+                current_lines.append(line)
+                current_size += line_size
 
-        print(f"[{datetime.now()}] Fetching up to {max_games_per_batch} games starting from {datetime.utcfromtimestamp(since/1000 if since else 0)} UTC...")
-        resp = requests.get(url, headers=headers, params=batch_params, stream=True)
-        resp.raise_for_status()
+    if current_lines:
+        split_file = f"{os.path.splitext(file_path)[0]}_part{part_num}.json"
+        with open(split_file, "w", encoding="utf-8") as out_f:
+            out_f.write("".join(current_lines))
+        split_files.append(split_file)
 
-        batch_games = 0
-        last_created_at = since
-
-        with open(output_file, mode, encoding="utf-8") as f:
-            for line in resp.iter_lines():
-                decoded_line = line.decode("utf-8")
-                if decoded_line.strip():
-                    game = json.loads(decoded_line)
-                    if "createdAt" in game:
-                        last_created_at = max(last_created_at if last_created_at else 0, game["createdAt"])
-                    f.write(decoded_line + "\n")
-                    batch_games += 1
-
-        total_games += batch_games
-        print(f"[{datetime.now()}] Fetched {batch_games} games in this batch (total: {total_games}).")
-
-        if batch_games == 0:
-            break  # No more games to fetch
-
-        since = last_created_at + 1
-        mode = "a"  # Append in subsequent batches
-
-    return total_games
+    return split_files
 
 # Get the user's folder ID
 USER_FOLDER_ID = get_or_create_user_folder(USERNAME)
@@ -192,12 +197,20 @@ headers = {"Accept": "application/x-ndjson", "Authorization": f"Bearer {LICHESS_
 # Prepare URL
 url = f"https://lichess.org/api/games/user/{USERNAME}"
 
-# Fetch games in batches
-total_games = fetch_games_in_batches(url, headers, params, OUTPUT_JSON)
+# Request new games
+print(f"[{datetime.now()}] Fetching games for {USERNAME}...")
+resp = requests.get(url, headers=headers, params=params, stream=True)
+resp.raise_for_status()
 
-# Log file size for debugging
-file_size = os.path.getsize(OUTPUT_JSON) / (1024 * 1024)  # Size in MB
-print(f"[{datetime.now()}] Games successfully fetched and saved to '{OUTPUT_JSON}' locally (file size: {file_size:.2f} MB, total games: {total_games}).")
+# Append or create new local file
+mode = "a" if os.path.exists(OUTPUT_JSON) else "w"
+with open(OUTPUT_JSON, mode, encoding="utf-8") as f:
+    for line in resp.iter_lines():
+        decoded_line = line.decode("utf-8")
+        if decoded_line.strip():
+            f.write(decoded_line + "\n")
+
+print(f"[{datetime.now()}] Games successfully fetched and saved to '{OUTPUT_JSON}' locally.")
 
 # Upload updated JSON to the user's Drive folder
 upload_to_drive(OUTPUT_JSON, USER_FOLDER_ID)

@@ -184,10 +184,13 @@ if os.path.exists(TEMP_JSON):
 
         # Combine with existing CSV if it exists
         if os.path.exists(OUTPUT_CSV):
-            df_old = pd.read_csv(OUTPUT_CSV)
+            df_old = pd.read_csv(OUTPUT_CSV, parse_dates=['created_at', 'last_move_at'])
             df_combined = pd.concat([df_new, df_old], ignore_index=True)
         else:
             df_combined = df_new
+        
+        # Ensure created_at is datetime before sorting
+        df_combined['created_at'] = pd.to_datetime(df_combined['created_at'])
         df_combined = df_combined.sort_values(by='created_at', ascending=False).reset_index(drop=True)
         df_combined.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
         print(f"[{datetime.now()}] Combined and saved new games to '{OUTPUT_CSV}'.")

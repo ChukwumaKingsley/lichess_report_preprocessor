@@ -2,8 +2,8 @@
 """
 preprocess_and_upload.py
 
-Processes game data and rating history, saves them as CSV files,
-and uploads to a user-specific Google Drive folder.
+Processes new game data from a temporary JSON and appends it to an existing CSV,
+processes rating history data, and uploads both to a user-specific Google Drive folder.
 
 Usage: python preprocess_and_upload.py <username>
 """
@@ -17,6 +17,8 @@ from dotenv import load_dotenv
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
+import time
+import ssl
 
 # Load .env for DRIVE_PARENT_FOLDER_ID
 load_dotenv()
@@ -42,8 +44,8 @@ PLAYER_DATA_FOLDER = os.path.join(os.getcwd(), "Player Data")
 os.makedirs(PLAYER_DATA_FOLDER, exist_ok=True)
 PLAYER_FOLDER = os.path.join(PLAYER_DATA_FOLDER, USERNAME)
 os.makedirs(PLAYER_FOLDER, exist_ok=True)
-GAMES_INPUT_JSON = os.path.join(PLAYER_FOLDER, f"games_{USERNAME}.json")
-GAMES_OUTPUT_CSV = os.path.join(PLAYER_FOLDER, f"games_{USERNAME}.csv")
+TEMP_JSON = os.path.join(PLAYER_FOLDER, f"temp_games_{USERNAME}.json")
+OUTPUT_CSV = os.path.join(PLAYER_FOLDER, f"games_{USERNAME}.csv")
 RATING_HISTORY_INPUT_JSON = os.path.join(PLAYER_FOLDER, f"rating_history_{USERNAME}.json")
 RATING_HISTORY_OUTPUT_CSV = os.path.join(PLAYER_FOLDER, f"rating_history_{USERNAME}.csv")
 
@@ -67,46 +69,37 @@ def get_or_create_user_folder(username):
         print(f"[{datetime.now()}] Created folder for '{username}' with ID: {folder_id}")
     return folder_id
 
-# Upload or update file to Drive
-def upload_to_drive(file_path, folder_id, mimetype="application/json"):
+# Upload or update file to Drive with retry logic
+def upload_to_drive(file_path, folder_id, mimetype="text/csv"):
     file_name = os.path.basename(file_path)
-    query = f"name='{file_name}' and '{folder_id}' in parents and trashed=false"
-    response = drive_service.files().list(q=query, fields="files(id, name)").execute()
-    files = response.get("files", [])
+    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)  # Size in MB
+    print(f"[{datetime.now()}] Attempting to upload '{file_name}' (size: {file_size_mb:.2f} MB)")
 
-    media = MediaFileUpload(file_path, mimetype=mimetype)
-    if files:
-        file_id = files[0]["id"]
-        updated_file = drive_service.files().update(fileId=file_id, media_body=media).execute()
-        print(f"[{datetime.now()}] Updated existing file '{file_name}' in Drive folder (ID: {file_id})")
-    else:
-        file_metadata = {"name": file_name, "parents": [folder_id]}
-        new_file = drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
-        print(f"[{datetime.now()}] Uploaded new file '{file_name}' to Drive folder (ID: {new_file.get('id')})")
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            response = drive_service.files().list(q=f"name='{file_name}' and '{folder_id}' in parents and trashed=false", fields="files(id, name)").execute()
+            files = response.get("files", [])
+            media = MediaFileUpload(file_path, mimetype=mimetype)
+            if files:
+                file_id = files[0]["id"]
+                drive_service.files().update(fileId=file_id, media_body=media).execute()
+                print(f"[{datetime.now()}] Updated existing file '{file_name}' in Drive folder (ID: {file_id})")
+            else:
+                file_metadata = {"name": file_name, "parents": [folder_id]}
+                new_file = drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
+                print(f"[{datetime.now()}] Uploaded new file '{file_name}' to Drive folder (ID: {new_file.get('id')})")
+            break
+        except (HttpError, IOError, ssl.SSLEOFError) as e:
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # Exponential backoff
+                print(f"[{datetime.now()}] Retry {attempt + 1}/{max_retries} due to error: {e}. Waiting {wait_time} seconds...")
+                time.sleep(wait_time)
+            else:
+                print(f"[{datetime.now()}] Failed after {max_retries} retries: {e}")
+                raise
 
-# Get the user's folder ID
-USER_FOLDER_ID = get_or_create_user_folder(USERNAME)
-
-# Check if input files exist locally (should be created by fetch scripts in the pipeline)
-if not os.path.exists(GAMES_INPUT_JSON):
-    raise RuntimeError(f"[{datetime.now()}] Input file '{GAMES_INPUT_JSON}' not found. Ensure fetch_json.py ran first.")
-if not os.path.exists(RATING_HISTORY_INPUT_JSON):
-    raise RuntimeError(f"[{datetime.now()}] Input file '{RATING_HISTORY_INPUT_JSON}' not found. Ensure fetch_rating_history.py ran first.")
-
-# --------------------------------
-# STEP 1: Read and preprocess game data
-# --------------------------------
-# Read NDJSON file
-games = []
-with open(GAMES_INPUT_JSON, "r", encoding="utf-8") as f:
-    for line in f:
-        if line.strip():  # Skip empty lines
-            games.append(json.loads(line))
-
-# Convert to DataFrame
-df = pd.DataFrame(games)
-
-# Helper functions
+# Helper functions for game preprocessing
 def get_player_name(player_dict):
     return player_dict.get('user', {}).get('name') or player_dict.get('name')
 
@@ -144,126 +137,105 @@ def format_time_control(clock):
                 return f"{initial_minutes}+{increment}"
     return None
 
-# Apply transformations
-df['played_as'], df['opponent_color'] = zip(*df.apply(get_sides, axis=1))
-df['player_name'] = USERNAME
-df['opponent_name'] = df.apply(lambda r: get_player_name(r['players'][r['opponent_color']]), axis=1)
+# Process new games and combine with existing CSV
+if os.path.exists(TEMP_JSON):
+    print(f"[{datetime.now()}] Processing new games from '{TEMP_JSON}'...")
+    new_games = []
+    with open(TEMP_JSON, "r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                new_games.append(json.loads(line))
 
-# For 'ai' source, set opponent to 'Lichess Stockfish'
-df['opponent_name'] = df.apply(lambda r: 'Lichess Stockfish' if r['source'] == 'ai' else r['opponent_name'], axis=1)
+    if new_games:
+        df_new = pd.DataFrame(new_games)
+        df_new['played_as'], df_new['opponent_color'] = zip(*df_new.apply(get_sides, axis=1))
+        df_new['player_name'] = USERNAME
+        df_new['opponent_name'] = df_new.apply(lambda r: get_player_name(r['players'][r['opponent_color']]), axis=1)
+        df_new['opponent_name'] = df_new.apply(lambda r: 'Lichess Stockfish' if r['source'] == 'ai' else r['opponent_name'], axis=1)
+        df_new['player_rating'] = df_new.apply(lambda r: get_rating(r['players'][r['played_as']], 'rating'), axis=1)
+        df_new['player_rating_diff'] = df_new.apply(lambda r: get_rating(r['players'][r['played_as']], 'ratingDiff'), axis=1)
+        df_new['opponent_rating'] = df_new.apply(lambda r: get_rating(r['players'][r['opponent_color']], 'rating'), axis=1)
+        df_new['opponent_rating_diff'] = df_new.apply(lambda r: get_rating(r['players'][r['opponent_color']], 'ratingDiff'), axis=1)
+        df_new['result'] = df_new.apply(map_result, axis=1)
+        df_new['opening_eco'] = df_new['opening'].apply(lambda o: o.get('eco') if isinstance(o, dict) else None)
+        df_new['opening_name'] = df_new['opening'].apply(lambda o: o.get('name') if isinstance(o, dict) else None)
+        df_new['opening_ply'] = df_new['opening'].apply(lambda o: o.get('ply') if isinstance(o, dict) else None)
+        df_new['time_control'] = df_new['clock'].apply(format_time_control)
+        df_new['game_id'] = df_new['id']
+        df_new['rated'] = df_new['rated']
+        df_new['speed'] = df_new['speed']
+        df_new['created_at'] = pd.to_datetime(df_new['createdAt'], unit='ms')
+        df_new['last_move_at'] = pd.to_datetime(df_new['lastMoveAt'], unit='ms')
+        df_new['status'] = df_new['status']
+        df_new['source'] = df_new['source']
+        df_new['tournament'] = df_new.get('tournament') is not None
+        df_new = df_new[df_new['variant'] == 'standard'].drop(columns=['variant'])
+        if 'moves' in df_new.columns:
+            df_new['move_count'] = df_new['moves'].apply(lambda m: len(m.split()) if isinstance(m, str) else None)
+            df_new['turns'] = df_new['move_count'].apply(lambda mc: (mc + 1) // 2 if isinstance(mc, int) else None)
+        else:
+            df_new['move_count'] = None
+            df_new['turns'] = None
+        df_new.loc[df_new['opponent_name'].isnull() & (df_new['source'] == 'friend'), 'opponent_name'] = 'Unnamed'
+        df_new.loc[df_new['time_control'].isnull() & (df_new['speed'] == 'correspondence'), 'time_control'] = 'daily'
+        df_new['time_control'] = df_new['time_control'].apply(lambda x: x.replace("s", "m") if isinstance(x, str) and "+" in x else x)
+        columns = ['game_id', 'rated', 'speed', 'created_at', 'last_move_at', 'status', 'source', 'player_name', 'played_as', 'opponent_name', 'opponent_color', 'player_rating', 'player_rating_diff', 'opponent_rating', 'opponent_rating_diff', 'result', 'opening_eco', 'opening_name', 'opening_ply', 'tournament', 'time_control', 'move_count', 'turns']
+        df_new = df_new[columns]
 
-df['player_rating'] = df.apply(lambda r: get_rating(r['players'][r['played_as']], 'rating'), axis=1)
-df['player_rating_diff'] = df.apply(lambda r: get_rating(r['players'][r['played_as']], 'ratingDiff'), axis=1)
-df['opponent_rating'] = df.apply(lambda r: get_rating(r['players'][r['opponent_color']], 'rating'), axis=1)
-df['opponent_rating_diff'] = df.apply(lambda r: get_rating(r['players'][r['opponent_color']], 'ratingDiff'), axis=1)
-df['result'] = df.apply(map_result, axis=1)
-df['opening_eco'] = df['opening'].apply(lambda o: o.get('eco') if isinstance(o, dict) else None)
-df['opening_name'] = df['opening'].apply(lambda o: o.get('name') if isinstance(o, dict) else None)
-df['opening_ply'] = df['opening'].apply(lambda o: o.get('ply') if isinstance(o, dict) else None)
+        # Combine with existing CSV if it exists
+        if os.path.exists(OUTPUT_CSV):
+            df_old = pd.read_csv(OUTPUT_CSV, parse_dates=['created_at', 'last_move_at'])
+            df_combined = pd.concat([df_new, df_old], ignore_index=True)
+        else:
+            df_combined = df_new
+        
+        # Ensure created_at is datetime before sorting
+        df_combined['created_at'] = pd.to_datetime(df_combined['created_at'])
+        df_combined = df_combined.sort_values(by='created_at', ascending=False).reset_index(drop=True)
+        df_combined.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+        print(f"[{datetime.now()}] Combined and saved new games to '{OUTPUT_CSV}'.")
+    else:
+        print(f"[{datetime.now()}] No new games to process.")
 
-# Time control column
-df['time_control'] = df['clock'].apply(format_time_control)
+    # Clean up temporary JSON
+    if os.path.exists(TEMP_JSON):
+        os.remove(TEMP_JSON)
+        print(f"[{datetime.now()}] Removed temporary JSON file '{TEMP_JSON}'.")
 
-# Timestamps and metadata
-df['game_id'] = df['id']
-df['rated'] = df['rated']
-df['speed'] = df['speed']
-df['created_at'] = pd.to_datetime(df['createdAt'], unit='ms')
-df['last_move_at'] = pd.to_datetime(df['lastMoveAt'], unit='ms')
-df['status'] = df['status']
-df['source'] = df['source']
-df['tournament'] = df.get('tournament') is not None
+# Process rating history
+if os.path.exists(RATING_HISTORY_INPUT_JSON):
+    print(f"[{datetime.now()}] Processing rating history for {USERNAME}...")
+    rating_history = []
+    with open(RATING_HISTORY_INPUT_JSON, "r", encoding="utf-8") as f:
+        rating_history = json.load(f)
 
-# Filter out non-standard games and drop the 'variant' column
-df = df[df['variant'] == 'standard']  # Keep only standard games
-df = df.drop(columns=['variant'])  # Remove the variant column
+    rating_rows = []
+    for entry in rating_history:
+        perfs = entry.get("points", [])
+        category = entry.get("name")
+        for point in perfs:
+            try:
+                date = datetime(point[0], point[1] + 1, point[2])
+                rating_rows.append({"category": category, "date": date, "rating": point[3]})
+            except ValueError:
+                continue
 
-# Handle moves and turns
-if 'moves' in df.columns:
-    df['move_count'] = df['moves'].apply(lambda m: len(m.split()) if isinstance(m, str) else None)
-    df['turns'] = df['move_count'].apply(lambda mc: (mc + 1) // 2 if isinstance(mc, int) else None)
-else:
-    df['move_count'] = None
-    df['turns'] = None
+    rating_df = pd.DataFrame(rating_rows)
+    every = rating_df.pivot(index="date", columns="category", values="rating")
+    all_dates = pd.date_range(start=every.index.min(), end=every.index.max())
+    every = every.reindex(all_dates)
+    every_filled = every.ffill()
+    rating_final = every.combine_first(every_filled)
+    rating_final = rating_final.reset_index().rename(columns={"index": "date"})
+    if not pd.api.types.is_datetime64_any_dtype(rating_final['date']):
+        rating_final['date'] = pd.to_datetime(rating_final['date'])
+    t_rating = rating_final.sort_values(by='date', ascending=False).reset_index(drop=True)
+    t_rating.to_csv(RATING_HISTORY_OUTPUT_CSV, index=False, encoding="utf-8-sig")
+    print(f"[{datetime.now()}] Saved rating history to '{RATING_HISTORY_OUTPUT_CSV}'")
 
-# Clean up rows with invalid or missing data
-df.loc[df['opponent_name'].isnull() & (df['source'] == 'friend'), 'opponent_name'] = 'Unnamed'
-
-# Convert 'correspondence' games with no time control to 'daily'
-df.loc[df['time_control'].isnull() & (df['speed'] == 'correspondence'), 'time_control'] = 'daily'
-
-# Convert time control from 'second+second' to 'minute+second' for other games
-df['time_control'] = df['time_control'].apply(
-    lambda x: x.replace("s", "m") if isinstance(x, str) and "+" in x else x
-)
-
-# Reorder columns for final output
-columns = [
-    'game_id', 'rated', 'speed', 'created_at', 'last_move_at', 'status', 'source',
-    'player_name', 'played_as', 'opponent_name', 'opponent_color',
-    'player_rating', 'player_rating_diff', 'opponent_rating', 'opponent_rating_diff',
-    'result', 'opening_eco', 'opening_name', 'opening_ply', 'tournament',
-    'time_control', 'move_count', 'turns'
-]
-final_df = df[columns]
-
-# Save to CSV
-to_save_df = final_df.copy()
-to_save_df.to_csv(GAMES_OUTPUT_CSV, index=False, encoding="utf-8-sig")
-print(f"[{datetime.now()}] Saved preprocessed game data to '{GAMES_OUTPUT_CSV}'")
-
-# --------------------------------
-# STEP 2: Process rating history
-# --------------------------------
-# Read rating history JSON file
-rating_history = []
-with open(RATING_HISTORY_INPUT_JSON, "r", encoding="utf-8") as f:
-    rating_history = json.load(f)
-
-rating_rows = []
-for entry in rating_history:
-    perfs = entry.get("points", [])
-    category = entry.get("name")
-    for point in perfs:
-        try:
-            # Correct month by adding 1
-            date = datetime(point[0], point[1] + 1, point[2])
-            rating_rows.append({"category": category, "date": date, "rating": point[3]})
-        except ValueError:
-            continue
-
-rating_df = pd.DataFrame(rating_rows)
-
-# Pivot so each category is a column, indexed by date
-every = rating_df.pivot(index="date", columns="category", values="rating")
-
-# Reindex to include all dates in range
-all_dates = pd.date_range(start=every.index.min(), end=every.index.max())
-every = every.reindex(all_dates)
-
-# Forward fill missing values by column
-every_filled = every.ffill()
-
-# Combine to keep original NaNs prior to first known rating
-rating_final = every.combine_first(every_filled)
-
-# Reset index and rename columns
-rating_final = rating_final.reset_index().rename(columns={"index": "date"})
-
-# Ensure 'date' is datetime
-if not pd.api.types.is_datetime64_any_dtype(rating_final['date']):
-    rating_final['date'] = pd.to_datetime(rating_final['date'])
-
-# Sort descending by date
-t_rating = rating_final.sort_values(by='date', ascending=False).reset_index(drop=True)
-
-# Save rating history CSV with BOM
-rating_csv = t_rating.copy()
-rating_csv.to_csv(RATING_HISTORY_OUTPUT_CSV, index=False, encoding="utf-8-sig")
-print(f"[{datetime.now()}] Saved rating history to '{RATING_HISTORY_OUTPUT_CSV}'")
-
-# --------------------------------
-# STEP 3: Upload both CSVs to Google Drive
-# --------------------------------
-upload_to_drive(GAMES_OUTPUT_CSV, USER_FOLDER_ID, mimetype="text/csv")
-upload_to_drive(RATING_HISTORY_OUTPUT_CSV, USER_FOLDER_ID, mimetype="text/csv")
+USER_FOLDER_ID = get_or_create_user_folder(USERNAME)
+# Upload both CSVs to Google Drive
+if os.path.exists(OUTPUT_CSV):
+    upload_to_drive(OUTPUT_CSV, USER_FOLDER_ID, mimetype="text/csv")
+if os.path.exists(RATING_HISTORY_OUTPUT_CSV):
+    upload_to_drive(RATING_HISTORY_OUTPUT_CSV, USER_FOLDER_ID, mimetype="text/csv")

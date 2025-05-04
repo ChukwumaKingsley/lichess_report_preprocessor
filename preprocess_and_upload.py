@@ -233,6 +233,7 @@ if os.path.exists(RATING_HISTORY_INPUT_JSON):
     t_rating.to_csv(RATING_HISTORY_OUTPUT_CSV, index=False, encoding="utf-8-sig")
     print(f"[{datetime.now()}] Saved rating history to '{RATING_HISTORY_OUTPUT_CSV}'")
 
+USER_FOLDER_ID = get_or_create_user_folder(USERNAME)
 # Upload both CSVs to Google Drive
 if os.path.exists(OUTPUT_CSV):
     upload_to_drive(OUTPUT_CSV, USER_FOLDER_ID, mimetype="text/csv")

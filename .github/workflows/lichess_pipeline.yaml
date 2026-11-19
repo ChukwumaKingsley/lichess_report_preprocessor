@@ -36,8 +36,14 @@ jobs:
       - name: Run all scripts
         env:
           GOOGLE_APPLICATION_CREDENTIALS: ./credentials.json
-        run: python run_all_scripts.py ${{ github.event.inputs.username }}
+          LICHESS_USERNAME: ${{ github.event.inputs.username }}
+        run: |
+          if [[ ! "$LICHESS_USERNAME" =~ ^[A-Za-z0-9_-]{2,30}$ ]]; then
+            echo "Error: Invalid Lichess username format." >&2
+            exit 1
+          fi
+          python run_all_scripts.py "$LICHESS_USERNAME"
 
       - name: Clean up
         if: always()
-        run: rm -f *.json *.csv || true
+        run: rm -rf credentials.json .env *.json *.csv "Player Data" || true

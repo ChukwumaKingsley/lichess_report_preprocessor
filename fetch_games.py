@@ -8,75 +8,73 @@ saving them to a temporary JSON file for further processing.
 Usage: python fetch_games.py <username>
 """
 
+import io
 import os
+import re
 import sys
+from datetime import datetime, timezone
+
+import pandas as pd
 import requests
-import json
-from datetime import datetime
 from dotenv import load_dotenv
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
-import io
-import time
-import ssl
+from googleapiclient.http import MediaIoBaseDownload
 
-# Load .env for LICHESS_TOKEN and DRIVE_PARENT_FOLDER_ID
-load_dotenv()
-LICHESS_TOKEN = os.getenv("LICHESS_TOKEN")
-DRIVE_PARENT_FOLDER_ID = os.getenv("DRIVE_PARENT_FOLDER_ID")
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_-]{2,30}$")
 
-# Check config
-if not LICHESS_TOKEN:
-    raise RuntimeError("LICHESS_TOKEN not set in .env")
-if not DRIVE_PARENT_FOLDER_ID:
-    raise RuntimeError("DRIVE_PARENT_FOLDER_ID not set in .env")
 
-# Build the Drive service (uses GOOGLE_APPLICATION_CREDENTIALS from environment)
-try:
-    drive_service = build("drive", "v3")
-except HttpError as e:
-    raise RuntimeError(f"Failed to build Drive service: {e}")
+def validate_username(username: str) -> str:
+    cleaned = (username or "").strip()
+    if not USERNAME_RE.fullmatch(cleaned):
+        raise ValueError(f"Invalid Lichess username: '{username}'")
+    return cleaned
 
-# Get username from command-line argument
-if len(sys.argv) != 2:
-    raise RuntimeError("Usage: python fetch_games.py <username>")
-USERNAME = sys.argv[1]
 
-# Create player-specific folder under Player Data
-PLAYER_DATA_FOLDER = os.path.join(os.getcwd(), "Player Data")
-os.makedirs(PLAYER_DATA_FOLDER, exist_ok=True)
-PLAYER_FOLDER = os.path.join(PLAYER_DATA_FOLDER, USERNAME)
-os.makedirs(PLAYER_FOLDER, exist_ok=True)
-TEMP_JSON = os.path.join(PLAYER_FOLDER, f"temp_games_{USERNAME}.json")
-OUTPUT_CSV = os.path.join(PLAYER_FOLDER, f"games_{USERNAME}.csv")
+def escape_drive_query(val: str) -> str:
+    return val.replace("\\", "\\\\").replace("'", "\\'")
 
-# Find or create a folder for the user on Google Drive
-def get_or_create_user_folder(username):
-    query = f"name='{username}' and mimeType='application/vnd.google-apps.folder' and '{DRIVE_PARENT_FOLDER_ID}' in parents"
+
+def get_or_create_user_folder(drive_service, username: str, parent_folder_id: str) -> str:
+    safe_user = escape_drive_query(username)
+    safe_parent = escape_drive_query(parent_folder_id)
+    query = (
+        f"name='{safe_user}' and mimeType='application/vnd.google-apps.folder' "
+        f"and '{safe_parent}' in parents and trashed = false"
+    )
     response = drive_service.files().list(q=query, fields="files(id, name)").execute()
     folders = response.get("files", [])
 
     if folders:
         folder_id = folders[0]["id"]
-        print(f"[{datetime.now()}] Found existing folder for '{username}' with ID: {folder_id}")
+        print(
+            f"[{datetime.now(timezone.utc)}] Found existing folder for '{username}' with ID: {folder_id}"
+        )
     else:
         folder_metadata = {
             "name": username,
             "mimeType": "application/vnd.google-apps.folder",
-            "parents": [DRIVE_PARENT_FOLDER_ID]
+            "parents": [parent_folder_id],
         }
-        folder = drive_service.files().create(body=folder_metadata, fields="id").execute()
+        folder = (
+            drive_service.files().create(body=folder_metadata, fields="id").execute()
+        )
         folder_id = folder.get("id")
-        print(f"[{datetime.now()}] Created folder for '{username}' with ID: {folder_id}")
+        print(
+            f"[{datetime.now(timezone.utc)}] Created folder for '{username}' with ID: {folder_id}"
+        )
     return folder_id
 
-# Download existing CSV from Drive if available
-def download_from_drive(file_path, folder_id):
+
+def download_from_drive(drive_service, file_path: str, folder_id: str) -> bool:
     try:
-        query = f"name='{os.path.basename(file_path)}' and '{folder_id}' in parents"
+        safe_name = escape_drive_query(os.path.basename(file_path))
+        safe_folder = escape_drive_query(folder_id)
+        query = (
+            f"name='{safe_name}' and '{safe_folder}' in parents and trashed = false"
+        )
         files = drive_service.files().list(q=query, fields="files(id, name)").execute()
-        if files["files"]:
+        if files.get("files"):
             file_id = files["files"][0]["id"]
             request = drive_service.files().get_media(fileId=file_id)
             fh = io.BytesIO()
@@ -84,50 +82,117 @@ def download_from_drive(file_path, folder_id):
             done = False
             while not done:
                 status, done = downloader.next_chunk()
-                print(f"[{datetime.now()}] Downloaded {int(status.progress() * 100)}%.")
+                if status:
+                    print(
+                        f"[{datetime.now(timezone.utc)}] Downloaded {int(status.progress() * 100)}%."
+                    )
             fh.seek(0)
             with open(file_path, "wb") as f:
                 f.write(fh.read())
-            print(f"[{datetime.now()}] Downloaded existing '{os.path.basename(file_path)}' from Drive folder.")
+            print(
+                f"[{datetime.now(timezone.utc)}] Downloaded existing '{os.path.basename(file_path)}' from Drive folder."
+            )
             return True
     except Exception as e:
-        print(f"[{datetime.now()}] Error downloading from Drive: {e}")
+        print(f"[{datetime.now(timezone.utc)}] Error downloading from Drive: {e}")
     return False
 
-# Get the user's folder ID
-USER_FOLDER_ID = get_or_create_user_folder(USERNAME)
 
-# Determine the latest timestamp from existing CSV
-max_created_at = 0
-if download_from_drive(OUTPUT_CSV, USER_FOLDER_ID):
-    import pandas as pd
-    if os.path.exists(OUTPUT_CSV):
-        df = pd.read_csv(OUTPUT_CSV)
-        if 'created_at' in df.columns:
-            max_created_at = int(pd.to_datetime(df['created_at']).max().timestamp() * 1000)
+def compute_max_created_at_ms(csv_path: str) -> int:
+    if not os.path.exists(csv_path):
+        return 0
+    try:
+        df = pd.read_csv(csv_path, usecols=lambda c: c == "created_at")
+        if "created_at" not in df.columns or df.empty:
+            return 0
+        parsed = pd.to_datetime(df["created_at"], errors="coerce", utc=True).dropna()
+        if parsed.empty:
+            return 0
+        max_dt = parsed.max()
+        if pd.isna(max_dt):
+            return 0
+        return max(0, int(max_dt.timestamp() * 1000))
+    except Exception as exc:
+        print(f"[{datetime.now(timezone.utc)}] Warning reading timestamps from CSV: {exc}")
+        return 0
 
-if max_created_at > 0:
-    params = {"since": max_created_at + 1, "clocks": True, "opening": True, "evals": False, "pgnInJson": False}
-    print(f"[{datetime.now()}] Will fetch games since {datetime.utcfromtimestamp(max_created_at / 1000)} UTC.")
-else:
-    params = {"clocks": True, "opening": True, "evals": False, "pgnInJson": False}
-    print(f"[{datetime.now()}] No previous games or unable to find timestamps. Fetching all games.")
 
-# Setup request headers
-headers = {"Accept": "application/x-ndjson", "Authorization": f"Bearer {LICHESS_TOKEN}"}
+def main() -> None:
+    load_dotenv()
+    lichess_token = os.getenv("LICHESS_TOKEN")
+    drive_parent_folder_id = os.getenv("DRIVE_PARENT_FOLDER_ID")
 
-# Prepare URL
-url = f"https://lichess.org/api/games/user/{USERNAME}"
+    if not lichess_token:
+        raise RuntimeError("LICHESS_TOKEN not set in .env")
+    if not drive_parent_folder_id:
+        raise RuntimeError("DRIVE_PARENT_FOLDER_ID not set in .env")
 
-# Fetch new games and save to temporary JSON
-print(f"[{datetime.now()}] Fetching games for {USERNAME}...")
-resp = requests.get(url, headers=headers, params=params, stream=True)
-resp.raise_for_status()
+    if len(sys.argv) != 2:
+        raise RuntimeError("Usage: python fetch_games.py <username>")
+    username = validate_username(sys.argv[1])
 
-with open(TEMP_JSON, "w", encoding="utf-8") as f:
-    for line in resp.iter_lines():
-        decoded_line = line.decode("utf-8")
-        if decoded_line.strip():
-            f.write(decoded_line + "\n")
+    try:
+        drive_service = build("drive", "v3", cache_discovery=False)
+    except HttpError as e:
+        raise RuntimeError(f"Failed to build Drive service: {e}") from e
 
-print(f"[{datetime.now()}] Games successfully fetched and saved to '{TEMP_JSON}'.")
+    player_data_folder = os.path.join(os.getcwd(), "Player Data")
+    player_folder = os.path.join(player_data_folder, username)
+    os.makedirs(player_folder, exist_ok=True)
+    temp_json = os.path.join(player_folder, f"temp_games_{username}.json")
+    output_csv = os.path.join(player_folder, f"games_{username}.csv")
+
+    user_folder_id = get_or_create_user_folder(
+        drive_service, username, drive_parent_folder_id
+    )
+
+    max_created_at = 0
+    if download_from_drive(drive_service, output_csv, user_folder_id):
+        max_created_at = compute_max_created_at_ms(output_csv)
+
+    if max_created_at > 0:
+        params = {
+            "since": max_created_at + 1,
+            "clocks": True,
+            "opening": True,
+            "evals": False,
+            "pgnInJson": False,
+        }
+        since_dt = datetime.fromtimestamp(max_created_at / 1000, tz=timezone.utc)
+        print(f"[{datetime.now(timezone.utc)}] Will fetch games since {since_dt.isoformat()}.")
+    else:
+        params = {
+            "clocks": True,
+            "opening": True,
+            "evals": False,
+            "pgnInJson": False,
+        }
+        print(
+            f"[{datetime.now(timezone.utc)}] No previous games or timestamps found. Fetching all games."
+        )
+
+    headers = {
+        "Accept": "application/x-ndjson",
+        "Authorization": f"Bearer {lichess_token}",
+    }
+    url = f"https://lichess.org/api/games/user/{username}"
+
+    print(f"[{datetime.now(timezone.utc)}] Fetching games for {username}...")
+    resp = requests.get(url, headers=headers, params=params, stream=True, timeout=60)
+    resp.raise_for_status()
+
+    with open(temp_json, "w", encoding="utf-8") as f:
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            decoded_line = line.decode("utf-8").strip()
+            if decoded_line:
+                f.write(decoded_line + "\n")
+
+    print(
+        f"[{datetime.now(timezone.utc)}] Games successfully fetched and saved to '{temp_json}'."
+    )
+
+
+if __name__ == "__main__":
+    main()
